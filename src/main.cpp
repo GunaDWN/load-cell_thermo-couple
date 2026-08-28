@@ -1,20 +1,34 @@
 #include <Arduino.h>
 #include <HX711_ADC.h>
 #include <EEPROM.h>
+#include <max6675.h>
 #include "KalmanFilter.h"
 
 // Konfigurasi pin HX711 ke Arduino Nano
 const int HX711_DOUT_PIN = 4; // Pin D4 (Data/DOUT)
 const int HX711_SCK_PIN  = 5; // Pin D5 (Clock/SCK)
 
-// Inisialisasi objek HX711_ADC
+// Konfigurasi pin modul termokopel MAX6675 ke Arduino Nano
+const int thermoCLK = 6; // Pin D6 (SCK / Clock)
+const int thermoCS  = 7; // Pin D7 (CS / Chip Select)
+const int thermoDO  = 8; // Pin D8 (SO / Data Out)
+
+// Inisialisasi objek sensor
 HX711_ADC LoadCell(HX711_DOUT_PIN, HX711_SCK_PIN);
+MAX6675 thermocouple(thermoCLK, thermoCS, thermoDO);
 
 // Filter Kalman Adaptif untuk menstabilkan pembacaan berat (satuan kg)
 // Parameter dituning kuat untuk menekan drift pada sensor kapasitas besar (3 Ton):
 // q = 0.0001 (process noise), r = 0.20 (measurement noise), threshold = 0.08 kg
 KalmanFilter beratKalman(0.0001f, 0.20f, 0.08f);
 float displayBerat = 0.0f; // Nilai berat stabil yang ditampilkan ke layar
+
+// Filter Kalman Adaptif untuk menstabilkan pembacaan suhu MAX6675 (satuan Celcius)
+// q = 0.02 (proses perubahan suhu), r = 1.50 (meredam loncatan noise ADC 0.25 C), threshold = 2.0 C
+KalmanFilter suhuKalman(0.02f, 1.50f, 2.0f);
+float displayTempC = 0.0f; // Nilai suhu Celcius stabil
+float displayTempF = 0.0f; // Nilai suhu Fahrenheit stabil
+bool suhuInitialized = false;
 
 // Alamat EEPROM untuk menyimpan nilai faktor kalibrasi (float = 4 byte)
 const int calVal_eepromAddress = 0;
@@ -44,9 +58,12 @@ void setup() {
   Serial.begin(57600);
   delay(10);
   Serial.println();
-  Serial.println(F("========================================="));
-  Serial.println(F(" Sistem Timbangan Digital HX711_ADC (KG) "));
-  Serial.println(F("========================================="));
+  Serial.println(F("===================================================="));
+  Serial.println(F("   Sistem Load Cell & Termokopel MAX6675 Arduino    "));
+  Serial.println(F("===================================================="));
+
+  // Menunggu stabilisasi modul MAX6675
+  delay(500);
 
   LoadCell.begin();
 
@@ -129,11 +146,43 @@ void loop() {
 
       float gaya = displayBerat * GRAVITY; // Konversi gaya: F = m * g (Newton)
 
+      // Pembacaan Termokopel MAX6675 (Celcius & Fahrenheit)
+      float rawTempC = thermocouple.readCelsius();
+
+      if (!isnan(rawTempC)) {
+        if (!suhuInitialized) {
+          suhuKalman.reset(rawTempC);
+          displayTempC = rawTempC;
+          suhuInitialized = true;
+        }
+
+        // Saring derau bit ADC 0.25 C dengan Adaptive Kalman Filter
+        float filteredTempC = suhuKalman.update(rawTempC);
+
+        // Deadband filter: redam fluktuasi di bawah 0.20 C agar angka display tenang
+        if (fabs(filteredTempC - displayTempC) >= 0.20f) {
+          displayTempC = filteredTempC;
+        }
+
+        // Konversi Fahrenheit presisi dari suhu Celcius yang sudah stabil
+        displayTempF = displayTempC * 1.8f + 32.0f;
+      }
+
       Serial.print(F("Berat : "));
       Serial.print(displayBerat, 3);
       Serial.print(F(" kg | Gaya : "));
       Serial.print(gaya, 2);
-      Serial.print(F(" N"));
+      Serial.print(F(" N | Suhu : "));
+
+      if (isnan(rawTempC)) {
+        Serial.print(F("Probe Terputus!"));
+      } else {
+        Serial.print(displayTempC, 2);
+        Serial.print(F(" C / "));
+        Serial.print(displayTempF, 2);
+        Serial.print(F(" F"));
+      }
+
       if (isWeightLocked && displayBerat > 0.0f) {
         Serial.print(F(" [STABIL]"));
       }
