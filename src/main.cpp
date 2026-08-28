@@ -4,286 +4,388 @@
 #include <max6675.h>
 #include "KalmanFilter.h"
 
-// Konfigurasi pin HX711 ke Arduino Nano
-const int HX711_DOUT_PIN = 4; // Pin D4 (Data/DOUT)
-const int HX711_SCK_PIN  = 5; // Pin D5 (Clock/SCK)
+// ============================================================================
+// KONFIGURASI PIN HARDWARE ARDUINO NANO
+// ============================================================================
+// Load Cell 1 (HX711 Modul 1)
+const int HX711_1_DOUT_PIN = 4; // Pin D4 (Data / DOUT)
+const int HX711_1_SCK_PIN  = 5; // Pin D5 (Clock / SCK)
 
-// Konfigurasi pin modul termokopel MAX6675 ke Arduino Nano
-const int thermoCLK = 6; // Pin D6 (SCK / Clock)
-const int thermoCS  = 7; // Pin D7 (CS / Chip Select)
-const int thermoDO  = 8; // Pin D8 (SO / Data Out)
+// Load Cell 2 (HX711 Modul 2)
+const int HX711_2_DOUT_PIN = 2; // Pin D2 (Data / DOUT)
+const int HX711_2_SCK_PIN  = 3; // Pin D3 (Clock / SCK)
 
-// Inisialisasi objek sensor
-HX711_ADC LoadCell(HX711_DOUT_PIN, HX711_SCK_PIN);
-MAX6675 thermocouple(thermoCLK, thermoCS, thermoDO);
+// Termokopel 1 (MAX6675 Modul 1)
+const int thermo1_CLK = 6; // Pin D6 (SCK / Clock)
+const int thermo1_CS  = 7; // Pin D7 (CS / Chip Select)
+const int thermo1_DO  = 8; // Pin D8 (SO / Data Out)
 
-// Filter Kalman Adaptif untuk menstabilkan pembacaan berat (satuan kg)
-// Parameter dituning kuat untuk menekan drift pada sensor kapasitas besar (3 Ton):
-// q = 0.0001 (process noise), r = 0.20 (measurement noise), threshold = 0.08 kg
-KalmanFilter beratKalman(0.0001f, 0.20f, 0.08f);
-float displayBerat = 0.0f; // Nilai berat stabil yang ditampilkan ke layar
+// Termokopel 2 (MAX6675 Modul 2)
+const int thermo2_CS  = 9;  // Pin D9 (CS / Chip Select)
+const int thermo2_CLK = 10; // Pin D10 (SCK / Clock)
+const int thermo2_DO  = 11; // Pin D11 (SO / Data Out)
 
-// Filter Kalman Adaptif untuk menstabilkan pembacaan suhu MAX6675 (satuan Celcius)
-// q = 0.02 (proses perubahan suhu), r = 1.50 (meredam loncatan noise ADC 0.25 C), threshold = 2.0 C
-KalmanFilter suhuKalman(0.02f, 1.50f, 2.0f);
-float displayTempC = 0.0f; // Nilai suhu Celcius stabil
-float displayTempF = 0.0f; // Nilai suhu Fahrenheit stabil
-bool suhuInitialized = false;
+// ============================================================================
+// INSTANSIASI OBJEK SENSOR
+// ============================================================================
+HX711_ADC LoadCell1(HX711_1_DOUT_PIN, HX711_1_SCK_PIN);
+HX711_ADC LoadCell2(HX711_2_DOUT_PIN, HX711_2_SCK_PIN);
 
-// Alamat EEPROM untuk menyimpan nilai faktor kalibrasi (float = 4 byte)
-const int calVal_eepromAddress = 0;
+MAX6675 thermocouple1(thermo1_CLK, thermo1_CS, thermo1_DO);
+MAX6675 thermocouple2(thermo2_CLK, thermo2_CS, thermo2_DO);
 
-// Variabel waktu untuk interval tampilan di Serial Monitor
+// ============================================================================
+// FILTER KALMAN ADAPTIF
+// ============================================================================
+// Filter untuk Load Cell (satuan kg)
+KalmanFilter beratKalman1(0.0001f, 0.20f, 0.08f);
+KalmanFilter beratKalman2(0.0001f, 0.20f, 0.08f);
+
+// Filter untuk Suhu MAX6675 (satuan Celcius)
+KalmanFilter suhuKalman1(0.02f, 1.50f, 2.0f);
+KalmanFilter suhuKalman2(0.02f, 1.50f, 2.0f);
+
+// ============================================================================
+// VARIABEL KONDISI & DISPLAY
+// ============================================================================
+// Nilai terfilter untuk display
+float displayBerat1 = 0.0f;
+float displayBerat2 = 0.0f;
+float displayTempC1 = 0.0f;
+float displayTempF1 = 0.0f;
+float displayTempC2 = 0.0f;
+float displayTempF2 = 0.0f;
+
+bool suhu1Initialized = false;
+bool suhu2Initialized = false;
+
+// Alamat EEPROM untuk kalibrasi (float = 4 byte)
+const int calVal_eepromAddress1 = 0; // Byte 0..3
+const int calVal_eepromAddress2 = 4; // Byte 4..7
+
+// Variabel Waktu
 unsigned long prevPrintTime = 0;
-const unsigned long printInterval = 250; // Tampilkan setiap 250 ms
+const unsigned long printInterval = 500; // Kirim data JSON setiap 500 ms (2x per detik)
 
-// Konstanta percepatan gravitasi bumi (m/s^2) untuk konversi massa ke gaya (F = m * g)
+// Konstanta percepatan gravitasi bumi (m/s^2)
 const float GRAVITY = 9.80665f;
 
-// Mode toggle untuk menampilkan info Raw ADC / Delta
-bool showDebugRaw = false;
+// Automatic Zero Tracking (AZT) & Stable Lock Parameters
+const float AZT_WINDOW = 0.120f;       // Drift < 120 gram dianggap hanyutan nol saat kosong
+const float STABLE_TOLERANCE = 0.040f; // Toleransi stabil 40 gram
+unsigned long lastChangeTime1 = 0;
+unsigned long lastChangeTime2 = 0;
+bool isWeightLocked1 = false;
+bool isWeightLocked2 = false;
 
-// Variabel untuk Automatic Zero Tracking (AZT) dan Stable Lock (Standar Industri)
-const float AZT_WINDOW = 0.120f;       // Beban di bawah 120 gram dianggap drift titik nol saat kosong
-const float STABLE_TOLERANCE = 0.040f; // Toleransi kestabilan 40 gram
-unsigned long lastChangeTime = 0;
-bool isWeightLocked = false;
+// Format JSON: false = Indented (Multi-line rapi), true = Compact (1 baris)
+bool compactJSON = false;
 
 // Deklarasi fungsi
-void calibrate();
-void changeSavedCalFactor();
+void calibrateLoadCell(uint8_t cellNum, HX711_ADC &cell, int eepromAddr, KalmanFilter &kalman, float &disp, unsigned long &lastTime, bool &isLocked);
+void printJSON();
 void printMenu();
 
 void setup() {
   Serial.begin(57600);
   delay(10);
   Serial.println();
-  Serial.println(F("===================================================="));
-  Serial.println(F("   Sistem Load Cell & Termokopel MAX6675 Arduino    "));
-  Serial.println(F("===================================================="));
+  Serial.println(F("=========================================================="));
+  Serial.println(F(" Sistem Monitoring 2x Load Cell & 2x Termokopel MAX6675 "));
+  Serial.println(F("=========================================================="));
 
-  // Menunggu stabilisasi modul MAX6675
+  // Menunggu stabilisasi modul termokopel MAX6675
   delay(500);
 
-  LoadCell.begin();
+  // Inisialisasi Load Cell
+  LoadCell1.begin();
+  LoadCell2.begin();
 
-  // Membalik arah pembacaan agar gaya tekan (compression pada posisi berdiri) bernilai positif (+)
-  LoadCell.setReverseOutput();
+  // Membalik polaritas agar gaya tekan (compression) bernilai positif (+)
+  LoadCell1.setReverseOutput();
+  LoadCell2.setReverseOutput();
 
-  // Membaca faktor kalibrasi dari EEPROM
-  float calibrationValue = 0.0;
-  EEPROM.get(calVal_eepromAddress, calibrationValue);
+  // Baca faktor kalibrasi dari EEPROM
+  float calValue1 = 0.0f;
+  float calValue2 = 0.0f;
+  EEPROM.get(calVal_eepromAddress1, calValue1);
+  EEPROM.get(calVal_eepromAddress2, calValue2);
 
-  // Periksa apakah nilai kalibrasi di EEPROM valid
-  if (isnan(calibrationValue) || isinf(calibrationValue) || calibrationValue == 0.0f) {
-    calibrationValue = 1.0f; // Nilai default jika belum pernah dikalibrasi
-    Serial.println(F("[INFO] Faktor kalibrasi belum tersimpan di EEPROM. Menggunakan nilai default: 1.0"));
-    Serial.println(F("[INFO] Silakan kirim 'r' pada Serial Monitor untuk kalibrasi (satuan: KG)."));
+  if (isnan(calValue1) || isinf(calValue1) || calValue1 == 0.0f) {
+    calValue1 = 1.0f;
+    Serial.println(F("[INFO] Load Cell 1 belum dikalibrasi (default: 1.0). Tekan '1' untuk kalibrasi."));
   } else {
-    Serial.print(F("[INFO] Faktor kalibrasi dimuat dari EEPROM: "));
-    Serial.println(calibrationValue, 2);
+    Serial.print(F("[INFO] Load Cell 1 Cal Factor: "));
+    Serial.println(calValue1, 2);
   }
 
-  unsigned long stabilizingtime = 2000; // Waktu stabilisasi 2 detik saat startup
-  boolean _tare = true;                 // Lakukan tare otomatis saat start
-  LoadCell.start(stabilizingtime, _tare);
-
-  if (LoadCell.getTareTimeoutFlag() || LoadCell.getSignalTimeoutFlag()) {
-    Serial.println(F("[ERROR] Timeout! Periksa koneksi kabel HX711 dan pinout MCU."));
-    while (1);
+  if (isnan(calValue2) || isinf(calValue2) || calValue2 == 0.0f) {
+    calValue2 = 1.0f;
+    Serial.println(F("[INFO] Load Cell 2 belum dikalibrasi (default: 1.0). Tekan '2' untuk kalibrasi."));
   } else {
-    LoadCell.setCalFactor(calibrationValue);
-    Serial.println(F("[STATUS] Inisialisasi selesai. Sensor siap digunakan (Satuan: KG)!"));
+    Serial.print(F("[INFO] Load Cell 2 Cal Factor: "));
+    Serial.println(calValue2, 2);
   }
 
+  unsigned long stabilizingtime = 2000; // Stabilisasi 2 detik saat tare awal
+  boolean _tare = true;
+  LoadCell1.start(stabilizingtime, _tare);
+  LoadCell2.start(stabilizingtime, _tare);
+
+  LoadCell1.setCalFactor(calValue1);
+  LoadCell2.setCalFactor(calValue2);
+
+  lastChangeTime1 = millis();
+  lastChangeTime2 = millis();
+
+  Serial.println(F("[STATUS] Inisialisasi selesai. Sensor siap digunakan!"));
   printMenu();
 }
 
 void loop() {
-  static boolean newDataReady = false;
+  // Update konversi HX711 (non-blocking)
+  LoadCell1.update();
+  LoadCell2.update();
 
-  // Memeriksa ketersediaan data konversi baru dari HX711 (non-blocking)
-  if (LoadCell.update()) {
-    newDataReady = true;
-  }
+  // Kirim output JSON secara berkala
+  if (millis() - prevPrintTime >= printInterval) {
+    // -------------------------------------------------------------
+    // PEMROSESAN LOAD CELL 1
+    // -------------------------------------------------------------
+    float rawBerat1 = LoadCell1.getData();
+    float filtered1 = beratKalman1.update(rawBerat1);
 
-  // Tampilkan data beban secara berkala jika data baru sudah tersedia
-  if (newDataReady) {
-    if (millis() - prevPrintTime >= printInterval) {
-      float rawBerat = LoadCell.getData();             // Nilai beban dari moving average HX711_ADC (kg)
-      float filteredBerat = beratKalman.update(rawBerat); // Dihaluskan oleh Adaptive Kalman Filter
-
-      // 1. Automatic Zero Tracking (AZT): saat sensor kosong (drift < 120 gram)
-      if (fabs(filteredBerat) < AZT_WINDOW) {
-        long currentTare = LoadCell.getTareOffset();
-        float cal = LoadCell.getCalFactor();
-        // Koreksi tareOffset secara bertahap untuk menyerap hanyutan titik nol
-        long driftCorrection = (long)(filteredBerat * cal * 0.10f);
-        LoadCell.setTareOffset(currentTare + driftCorrection);
-
-        displayBerat = 0.0f;
-        isWeightLocked = false;
-        lastChangeTime = millis();
-      } 
-      // 2. Penimbangan Beban Nyata (>= 120 gram):
-      else {
-        // Cek apakah beban bergerak / berubah melebihi toleransi (40 gram)
-        if (fabs(filteredBerat - displayBerat) > STABLE_TOLERANCE) {
-          isWeightLocked = false;
-          displayBerat = filteredBerat;
-          lastChangeTime = millis();
-        } else {
-          // Beban diam: jika tenang selama 1.2 detik, kunci nilainya agar tidak merayap
-          if (!isWeightLocked && (millis() - lastChangeTime >= 1200)) {
-            isWeightLocked = true;
-            displayBerat = filteredBerat;
-          }
-          if (!isWeightLocked) {
-            displayBerat = filteredBerat;
-          }
-        }
-      }
-
-      float gaya = displayBerat * GRAVITY; // Konversi gaya: F = m * g (Newton)
-
-      // Pembacaan Termokopel MAX6675 (Celcius & Fahrenheit)
-      float rawTempC = thermocouple.readCelsius();
-
-      if (!isnan(rawTempC)) {
-        if (!suhuInitialized) {
-          suhuKalman.reset(rawTempC);
-          displayTempC = rawTempC;
-          suhuInitialized = true;
-        }
-
-        // Saring derau bit ADC 0.25 C dengan Adaptive Kalman Filter
-        float filteredTempC = suhuKalman.update(rawTempC);
-
-        // Deadband filter: redam fluktuasi di bawah 0.20 C agar angka display tenang
-        if (fabs(filteredTempC - displayTempC) >= 0.20f) {
-          displayTempC = filteredTempC;
-        }
-
-        // Konversi Fahrenheit presisi dari suhu Celcius yang sudah stabil
-        displayTempF = displayTempC * 1.8f + 32.0f;
-      }
-
-      Serial.print(F("Berat : "));
-      Serial.print(displayBerat, 3);
-      Serial.print(F(" kg | Gaya : "));
-      Serial.print(gaya, 2);
-      Serial.print(F(" N | Suhu : "));
-
-      if (isnan(rawTempC)) {
-        Serial.print(F("Probe Terputus!"));
+    if (fabs(filtered1) < AZT_WINDOW) {
+      // Automatic Zero Tracking saat kosong
+      long curTare1 = LoadCell1.getTareOffset();
+      float cal1 = LoadCell1.getCalFactor();
+      LoadCell1.setTareOffset(curTare1 + (long)(filtered1 * cal1 * 0.10f));
+      displayBerat1 = 0.0f;
+      isWeightLocked1 = false;
+      lastChangeTime1 = millis();
+    } else {
+      if (fabs(filtered1 - displayBerat1) > STABLE_TOLERANCE) {
+        isWeightLocked1 = false;
+        displayBerat1 = filtered1;
+        lastChangeTime1 = millis();
       } else {
-        Serial.print(displayTempC, 2);
-        Serial.print(F(" C / "));
-        Serial.print(displayTempF, 2);
-        Serial.print(F(" F"));
+        if (!isWeightLocked1 && (millis() - lastChangeTime1 >= 1200)) {
+          isWeightLocked1 = true;
+          displayBerat1 = filtered1;
+        }
+        if (!isWeightLocked1) {
+          displayBerat1 = filtered1;
+        }
       }
-
-      if (isWeightLocked && displayBerat > 0.0f) {
-        Serial.print(F(" [STABIL]"));
-      }
-
-      if (showDebugRaw) {
-        float calFactor = LoadCell.getCalFactor();
-        long tareOffset = LoadCell.getTareOffset();
-        long rawDelta = (long)(displayBerat * calFactor);
-        long rawADC = tareOffset + rawDelta;
-        Serial.print(F("  |  Raw ADC: "));
-        Serial.print(rawADC);
-        Serial.print(F("  |  Delta: "));
-        Serial.print(rawDelta);
-      }
-      Serial.println();
-
-      newDataReady = false;
-      prevPrintTime = millis();
     }
+
+    // -------------------------------------------------------------
+    // PEMROSESAN LOAD CELL 2
+    // -------------------------------------------------------------
+    float rawBerat2 = LoadCell2.getData();
+    float filtered2 = beratKalman2.update(rawBerat2);
+
+    if (fabs(filtered2) < AZT_WINDOW) {
+      // Automatic Zero Tracking saat kosong
+      long curTare2 = LoadCell2.getTareOffset();
+      float cal2 = LoadCell2.getCalFactor();
+      LoadCell2.setTareOffset(curTare2 + (long)(filtered2 * cal2 * 0.10f));
+      displayBerat2 = 0.0f;
+      isWeightLocked2 = false;
+      lastChangeTime2 = millis();
+    } else {
+      if (fabs(filtered2 - displayBerat2) > STABLE_TOLERANCE) {
+        isWeightLocked2 = false;
+        displayBerat2 = filtered2;
+        lastChangeTime2 = millis();
+      } else {
+        if (!isWeightLocked2 && (millis() - lastChangeTime2 >= 1200)) {
+          isWeightLocked2 = true;
+          displayBerat2 = filtered2;
+        }
+        if (!isWeightLocked2) {
+          displayBerat2 = filtered2;
+        }
+      }
+    }
+
+    // -------------------------------------------------------------
+    // PEMROSESAN TERMOKOPEL 1
+    // -------------------------------------------------------------
+    float rawTempC1 = thermocouple1.readCelsius();
+    if (!isnan(rawTempC1)) {
+      if (!suhu1Initialized) {
+        suhuKalman1.reset(rawTempC1);
+        displayTempC1 = rawTempC1;
+        suhu1Initialized = true;
+      }
+      float filteredTempC1 = suhuKalman1.update(rawTempC1);
+      if (fabs(filteredTempC1 - displayTempC1) >= 0.20f) {
+        displayTempC1 = filteredTempC1;
+      }
+      displayTempF1 = displayTempC1 * 1.8f + 32.0f;
+    }
+
+    // -------------------------------------------------------------
+    // PEMROSESAN TERMOKOPEL 2
+    // -------------------------------------------------------------
+    float rawTempC2 = thermocouple2.readCelsius();
+    if (!isnan(rawTempC2)) {
+      if (!suhu2Initialized) {
+        suhuKalman2.reset(rawTempC2);
+        displayTempC2 = rawTempC2;
+        suhu2Initialized = true;
+      }
+      float filteredTempC2 = suhuKalman2.update(rawTempC2);
+      if (fabs(filteredTempC2 - displayTempC2) >= 0.20f) {
+        displayTempC2 = filteredTempC2;
+      }
+      displayTempF2 = displayTempC2 * 1.8f + 32.0f;
+    }
+
+    // Cetak JSON ke Serial Monitor
+    printJSON();
+
+    prevPrintTime = millis();
   }
 
-  // Menangani input perintah dari Serial Monitor
+  // ---------------------------------------------------------------
+  // PENANGANAN PERINTAH SERIAL MONITOR
+  // ---------------------------------------------------------------
   if (Serial.available() > 0) {
     char inByte = Serial.read();
-
-    // Abaikan karakter newline dan carriage return
-    if (inByte == '\r' || inByte == '\n') {
-      return;
-    }
+    if (inByte == '\r' || inByte == '\n') return;
 
     if (inByte == 't') {
-      Serial.println(F("-> Melakukan Tare (set titik nol)..."));
-      LoadCell.tareNoDelay();
-    } else if (inByte == 'r') {
-      calibrate();
-    } else if (inByte == 'c') {
-      changeSavedCalFactor();
-    } else if (inByte == 'd') {
-      showDebugRaw = !showDebugRaw;
-      Serial.print(F("-> Info Raw ADC & Delta: "));
-      Serial.println(showDebugRaw ? F("AKTIF") : F("NONAKTIF"));
+      Serial.println(F("-> Melakukan Tare (set titik nol) kedua Load Cell..."));
+      LoadCell1.tareNoDelay();
+      LoadCell2.tareNoDelay();
+    } else if (inByte == '1') {
+      calibrateLoadCell(1, LoadCell1, calVal_eepromAddress1, beratKalman1, displayBerat1, lastChangeTime1, isWeightLocked1);
+    } else if (inByte == '2') {
+      calibrateLoadCell(2, LoadCell2, calVal_eepromAddress2, beratKalman2, displayBerat2, lastChangeTime2, isWeightLocked2);
+    } else if (inByte == 'j') {
+      compactJSON = !compactJSON;
+      Serial.print(F("-> Format JSON diubah: "));
+      Serial.println(compactJSON ? F("COMPACT (1 baris)") : F("INDENTED (Multi-baris)"));
     } else if (inByte == '?' || inByte == 'h') {
       printMenu();
     }
   }
 
-  // Cek apakah proses Tare non-blocking telah selesai
-  if (LoadCell.getTareStatus() == true) {
-    beratKalman.reset(0.0f);
-    displayBerat = 0.0f;
-    isWeightLocked = false;
-    lastChangeTime = millis();
+  // Cek status Tare
+  if (LoadCell1.getTareStatus() == true || LoadCell2.getTareStatus() == true) {
+    beratKalman1.reset(0.0f);
+    beratKalman2.reset(0.0f);
+    displayBerat1 = 0.0f;
+    displayBerat2 = 0.0f;
+    isWeightLocked1 = false;
+    isWeightLocked2 = false;
+    lastChangeTime1 = millis();
+    lastChangeTime2 = millis();
     Serial.println(F("[STATUS] Tare selesai. Titik nol berhasil disetel."));
   }
 }
 
 /**
- * @brief Prosedur kalibrasi interaktif melalui Serial Monitor.
- * Mengikuti metode standar dari library HX711_ADC (Olav Kallhovd).
+ * @brief Menampilkan data dalam format JSON sesuai spesifikasi
  */
-void calibrate() {
+void printJSON() {
+  float gaya1 = displayBerat1 * GRAVITY;
+  float gaya2 = displayBerat2 * GRAVITY;
+
+  float rawTempC1 = thermocouple1.readCelsius();
+  float rawTempC2 = thermocouple2.readCelsius();
+
+  if (compactJSON) {
+    // Mode satu baris (Compact)
+    Serial.print(F("{\"loadcell1\":{\"berat\":"));
+    Serial.print(displayBerat1, 2);
+    Serial.print(F(",\"gaya\":"));
+    Serial.print(gaya1, 1);
+    Serial.print(F("},\"loadcell2\":{\"berat\":"));
+    Serial.print(displayBerat2, 2);
+    Serial.print(F(",\"gaya\":"));
+    Serial.print(gaya2, 1);
+    Serial.print(F("},\"termokopel1\":{\"suhu\":"));
+    if (isnan(rawTempC1)) Serial.print(F("null")); else Serial.print(displayTempC1, 1);
+    Serial.print(F(",\"fahrenheit\":"));
+    if (isnan(rawTempC1)) Serial.print(F("null")); else Serial.print(displayTempF1, 1);
+    Serial.print(F("},\"termokopel2\":{\"suhu\":"));
+    if (isnan(rawTempC2)) Serial.print(F("null")); else Serial.print(displayTempC2, 1);
+    Serial.print(F(",\"fahrenheit\":"));
+    if (isnan(rawTempC2)) Serial.print(F("null")); else Serial.print(displayTempF2, 1);
+    Serial.println(F("}}"));
+  } else {
+    // Mode berlekuk (Indented)
+    Serial.println(F("{"));
+    Serial.println(F("  \"loadcell1\": {"));
+    Serial.print(F("    \"berat\": ")); Serial.print(displayBerat1, 2); Serial.println(F(","));
+    Serial.print(F("    \"gaya\": "));  Serial.print(gaya1, 1); Serial.println();
+    Serial.println(F("  },"));
+    Serial.println(F("  \"loadcell2\": {"));
+    Serial.print(F("    \"berat\": ")); Serial.print(displayBerat2, 2); Serial.println(F(","));
+    Serial.print(F("    \"gaya\": "));  Serial.print(gaya2, 1); Serial.println();
+    Serial.println(F("  },"));
+    Serial.println(F("  \"termokopel1\": {"));
+    Serial.print(F("    \"suhu\": "));
+    if (isnan(rawTempC1)) Serial.print(F("null")); else Serial.print(displayTempC1, 1);
+    Serial.println(F(","));
+    Serial.print(F("    \"fahrenheit\": "));
+    if (isnan(rawTempC1)) Serial.print(F("null")); else Serial.print(displayTempF1, 1);
+    Serial.println();
+    Serial.println(F("  },"));
+    Serial.println(F("  \"termokopel2\": {"));
+    Serial.print(F("    \"suhu\": "));
+    if (isnan(rawTempC2)) Serial.print(F("null")); else Serial.print(displayTempC2, 1);
+    Serial.println(F(","));
+    Serial.print(F("    \"fahrenheit\": "));
+    if (isnan(rawTempC2)) Serial.print(F("null")); else Serial.print(displayTempF2, 1);
+    Serial.println();
+    Serial.println(F("  }"));
+    Serial.println(F("}"));
+  }
+}
+
+/**
+ * @brief Prosedur kalibrasi interaktif untuk Load Cell tertentu
+ */
+void calibrateLoadCell(uint8_t cellNum, HX711_ADC &cell, int eepromAddr, KalmanFilter &kalman, float &disp, unsigned long &lastTime, bool &isLocked) {
   Serial.println();
   Serial.println(F("************************************************"));
-  Serial.println(F("           MULAI PROSEDUR KALIBRASI             "));
+  Serial.print(F("        KALIBRASI LOAD CELL "));
+  Serial.println(cellNum);
   Serial.println(F("************************************************"));
-  Serial.println(F("1. Letakkan load cell pada permukaan yang datar dan stabil."));
-  Serial.println(F("2. Pastikan TIDAK ADA BEBAN di atas load cell."));
-  Serial.println(F("3. Kirim karakter 't' dari Serial Monitor untuk Tare titik nol..."));
+  Serial.println(F("1. Pastikan TIDAK ADA BEBAN di atas sensor."));
+  Serial.println(F("2. Kirim karakter 't' untuk Tare titik nol..."));
 
-  // Kosongkan sisa buffer serial
   while (Serial.available() > 0) Serial.read();
 
-  // Langkah 1: Menunggu perintah Tare
   boolean _resume = false;
   while (!_resume) {
-    LoadCell.update();
+    cell.update();
     if (Serial.available() > 0) {
       char inByte = Serial.read();
-      if (inByte == 't') {
-        LoadCell.tareNoDelay();
-      }
+      if (inByte == 't') cell.tareNoDelay();
     }
-    if (LoadCell.getTareStatus() == true) {
+    if (cell.getTareStatus() == true) {
       Serial.println(F("-> Titik nol (Tare) berhasil disetel!"));
       _resume = true;
     }
   }
 
-  // Langkah 2: Meminta meletakkan beban standar
   Serial.println();
-  Serial.println(F("4. Sekarang, letakkan BEBAN YANG SUDAH DIKETAHUI bobotnya di atas load cell."));
-  Serial.println(F("5. Masukkan nilai bobot beban tersebut dalam KILOGRAM / KG (contoh: 1.446 atau 50.0) lalu tekan Kirim/Enter:"));
+  Serial.println(F("3. Letakkan BEBAN YANG SUDAH DIKETAHUI bobotnya di atas sensor."));
+  Serial.println(F("4. Masukkan bobotnya dalam KG (contoh: 1.446 atau 50.0) lalu tekan Enter:"));
 
-  float known_mass = 0.0;
+  float known_mass = 0.0f;
   _resume = false;
   while (!_resume) {
-    LoadCell.update();
+    cell.update();
     if (Serial.available() > 0) {
       known_mass = Serial.parseFloat();
       if (known_mass != 0.0f) {
-        Serial.print(F("-> Bobot beban referensi: "));
+        Serial.print(F("-> Bobot referensi diterima: "));
         Serial.print(known_mass, 3);
         Serial.println(F(" kg"));
         _resume = true;
@@ -291,47 +393,29 @@ void calibrate() {
     }
   }
 
-  // Berikan waktu stabilisasi mekanik sebelum mengambil data kalibrasi
-  Serial.println(F("-> Menunggu stabilisasi beban selama 2 detik..."));
+  Serial.println(F("-> Menunggu stabilisasi mekanik 2 detik..."));
   unsigned long settleStart = millis();
   while (millis() - settleStart < 2000) {
-    LoadCell.update();
+    cell.update();
   }
 
-  // Langkah 3: Menghitung faktor kalibrasi baru
-  LoadCell.refreshDataSet(); // Pastikan dataset diperbarui dengan beban terpasang
-  float newCalibrationValue = LoadCell.getNewCalibration(known_mass);
+  cell.refreshDataSet();
+  float newCalValue = cell.getNewCalibration(known_mass);
 
-  long tareOffset = LoadCell.getTareOffset();
-  long rawWithLoad = (long)(LoadCell.getData() * newCalibrationValue) + tareOffset;
+  long tareOffset = cell.getTareOffset();
+  long rawWithLoad = (long)(cell.getData() * newCalValue) + tareOffset;
   long rawDelta = rawWithLoad - tareOffset;
 
   Serial.println();
-  Serial.print(F("-> Nilai Tare Offset (Kosong) : "));
-  Serial.println(tareOffset);
-  Serial.print(F("-> Nilai Raw dengan Beban     : "));
-  Serial.println(rawWithLoad);
-  Serial.print(F("-> Selisih Raw ADC (Delta)    : "));
-  Serial.println(rawDelta);
-  Serial.print(F("-> Faktor kalibrasi terhitung : "));
-  Serial.println(newCalibrationValue, 4);
+  Serial.print(F("-> Tare Offset (Kosong) : ")); Serial.println(tareOffset);
+  Serial.print(F("-> Raw dengan Beban     : ")); Serial.println(rawWithLoad);
+  Serial.print(F("-> Delta Raw ADC        : ")); Serial.println(rawDelta);
+  Serial.print(F("-> Faktor Kalibrasi Baru: ")); Serial.println(newCalValue, 4);
 
-  if (newCalibrationValue < 0) {
-    Serial.println(F("\n[PERINGATAN] Faktor kalibrasi bernilai MINUS (-)!"));
-    Serial.println(F("-> Penyebab: Arah penekanan terbalik dari tanda panah load cell, atau kabel A+ dan A- tertukar."));
-  }
-  if (abs(rawDelta) < 1000) {
-    Serial.println(F("\n[PERINGATAN KRITIS] Perubahan nilai ADC sangat kecil (< 1000 counts)!"));
-    Serial.println(F("-> Untuk beban seberat ini, sinyal ADC seharusnya lebih besar."));
-    Serial.println(F("-> Pastikan sensor tidak terhambat/menyentuh permukaan selain titik tumpu."));
-  }
-
-  // Langkah 4: Konfirmasi penyimpanan ke EEPROM
-  Serial.print(F("Apakah ingin menyimpan faktor kalibrasi ke EEPROM (alamat "));
-  Serial.print(calVal_eepromAddress);
+  Serial.print(F("Simpan ke EEPROM (alamat "));
+  Serial.print(eepromAddr);
   Serial.println(F(")? (y/n): "));
 
-  // Bersihkan sisa karakter enter di buffer
   while (Serial.available() > 0) Serial.read();
 
   _resume = false;
@@ -339,90 +423,40 @@ void calibrate() {
     if (Serial.available() > 0) {
       char inByte = Serial.read();
       if (inByte == 'y' || inByte == 'Y') {
-        EEPROM.put(calVal_eepromAddress, newCalibrationValue);
-        float verifiedValue = 0.0;
-        EEPROM.get(calVal_eepromAddress, verifiedValue);
-
-        Serial.print(F("-> Berhasil disimpan ke EEPROM: "));
-        Serial.println(verifiedValue, 4);
-        LoadCell.setCalFactor(newCalibrationValue);
-        _resume = true;
-      } else if (inByte == 'n' || inByte == 'N') {
-        LoadCell.setCalFactor(newCalibrationValue);
-        Serial.println(F("-> Nilai digunakan untuk sesi ini saja (TIDAK disimpan ke EEPROM)."));
-        _resume = true;
-      }
-    }
-  }
-
-  beratKalman.reset(known_mass);
-  displayBerat = known_mass;
-
-  Serial.println(F("************************************************"));
-  Serial.println(F("          KALIBRASI SELESAI & BERHASIL          "));
-  Serial.println(F("************************************************"));
-  printMenu();
-}
-
-/**
- * @brief Memasukkan nilai faktor kalibrasi secara manual melalui Serial Monitor.
- */
-void changeSavedCalFactor() {
-  float currentCalFactor = LoadCell.getCalFactor();
-  Serial.println();
-  Serial.println(F("------------------------------------------------"));
-  Serial.print(F("Faktor kalibrasi saat ini: "));
-  Serial.println(currentCalFactor, 4);
-  Serial.println(F("Masukkan nilai baru via Serial Monitor (contoh: 1447.0) lalu Enter:"));
-
-  while (Serial.available() > 0) Serial.read();
-
-  float newCalibrationValue = 0.0;
-  boolean _resume = false;
-  while (!_resume) {
-    if (Serial.available() > 0) {
-      newCalibrationValue = Serial.parseFloat();
-      if (newCalibrationValue != 0.0f) {
-        Serial.print(F("-> Nilai faktor kalibrasi baru: "));
-        Serial.println(newCalibrationValue, 4);
-        LoadCell.setCalFactor(newCalibrationValue);
-        _resume = true;
-      }
-    }
-  }
-
-  Serial.print(F("Simpan nilai ini ke EEPROM? (y/n): "));
-  while (Serial.available() > 0) Serial.read();
-
-  _resume = false;
-  while (!_resume) {
-    if (Serial.available() > 0) {
-      char inByte = Serial.read();
-      if (inByte == 'y' || inByte == 'Y') {
-        EEPROM.put(calVal_eepromAddress, newCalibrationValue);
+        EEPROM.put(eepromAddr, newCalValue);
         Serial.println(F("-> Berhasil disimpan ke EEPROM."));
+        cell.setCalFactor(newCalValue);
         _resume = true;
       } else if (inByte == 'n' || inByte == 'N') {
-        Serial.println(F("-> Nilai tidak disimpan ke EEPROM."));
+        cell.setCalFactor(newCalValue);
+        Serial.println(F("-> Digunakan untuk sesi ini saja (TIDAK disimpan)."));
         _resume = true;
       }
     }
   }
-  Serial.println(F("------------------------------------------------"));
+
+  kalman.reset(known_mass);
+  disp = known_mass;
+  isLocked = true;
+  lastTime = millis();
+
+  Serial.println(F("************************************************"));
+  Serial.println(F("              KALIBRASI SELESAI                 "));
+  Serial.println(F("************************************************"));
   printMenu();
 }
 
 /**
- * @brief Menampilkan menu perintah yang tersedia di Serial Monitor.
+ * @brief Menampilkan menu panduan perintah serial
  */
 void printMenu() {
   Serial.println();
-  Serial.println(F("--- Petunjuk Perintah Serial Monitor ---"));
-  Serial.println(F("  't' : Tare (nol-kan timbangan)"));
-  Serial.println(F("  'r' : Kalibrasi ulang timbangan (masukkan beban dalam KG)"));
-  Serial.println(F("  'c' : Ubah faktor kalibrasi secara manual"));
-  Serial.println(F("  'd' : Toggle info Raw ADC & Delta"));
-  Serial.println(F("  '?' : Tampilkan menu petunjuk ini"));
-  Serial.println(F("----------------------------------------"));
+  Serial.println(F("--- Menu Perintah Serial Monitor ---"));
+  Serial.println(F("  't' : Tare (nol-kan kedua load cell)"));
+  Serial.println(F("  '1' : Kalibrasi Load Cell 1"));
+  Serial.println(F("  '2' : Kalibrasi Load Cell 2"));
+  Serial.println(F("  'j' : Toggle format JSON (Indented / Compact)"));
+  Serial.println(F("  '?' : Tampilkan menu ini"));
+  Serial.println(F("------------------------------------"));
   Serial.println();
 }
