@@ -78,8 +78,8 @@ unsigned long lastChangeTime2 = 0;
 bool isWeightLocked1 = false;
 bool isWeightLocked2 = false;
 
-// Format JSON: false = Indented (Multi-line rapi), true = Compact (1 baris)
-bool compactJSON = false;
+// Format JSON: true = Compact (1 baris per paket - Standar Komunikasi Serial IoT)
+bool compactJSON = true;
 
 // Deklarasi fungsi
 void calibrateLoadCell(uint8_t cellNum, HX711_ADC &cell, int eepromAddr, KalmanFilter &kalman, float &disp, unsigned long &lastTime, bool &isLocked);
@@ -111,17 +111,17 @@ void setup() {
   EEPROM.get(calVal_eepromAddress1, calValue1);
   EEPROM.get(calVal_eepromAddress2, calValue2);
 
-  if (isnan(calValue1) || isinf(calValue1) || calValue1 == 0.0f) {
-    calValue1 = 1.0f;
-    Serial.println(F("[INFO] Load Cell 1 belum dikalibrasi (default: 1.0). Tekan '1' untuk kalibrasi."));
+  if (isnan(calValue1) || isinf(calValue1) || calValue1 == 0.0f || calValue1 == 1.0f) {
+    calValue1 = 1412.86f;
+    Serial.println(F("[INFO] Load Cell 1 menggunakan faktor kalibrasi awal 1412.86."));
   } else {
     Serial.print(F("[INFO] Load Cell 1 Cal Factor: "));
     Serial.println(calValue1, 2);
   }
 
-  if (isnan(calValue2) || isinf(calValue2) || calValue2 == 0.0f) {
-    calValue2 = 1.0f;
-    Serial.println(F("[INFO] Load Cell 2 belum dikalibrasi (default: 1.0). Tekan '2' untuk kalibrasi."));
+  if (isnan(calValue2) || isinf(calValue2) || calValue2 == 0.0f || calValue2 == 1.0f) {
+    calValue2 = 1412.86f;
+    Serial.println(F("[INFO] Load Cell 2 menggunakan faktor kalibrasi awal 1412.86."));
   } else {
     Serial.print(F("[INFO] Load Cell 2 Cal Factor: "));
     Serial.println(calValue2, 2);
@@ -153,6 +153,12 @@ void loop() {
     // PEMROSESAN LOAD CELL 1
     // -------------------------------------------------------------
     float rawBerat1 = LoadCell1.getData();
+    if (isnan(rawBerat1) || isinf(rawBerat1)) {
+      rawBerat1 = 0.0f;
+    }
+    if (rawBerat1 < -50.0f) rawBerat1 = -50.0f;
+    if (rawBerat1 > 500.0f) rawBerat1 = 500.0f;
+
     float filtered1 = beratKalman1.update(rawBerat1);
 
     if (fabs(filtered1) < AZT_WINDOW) {
@@ -183,6 +189,12 @@ void loop() {
     // PEMROSESAN LOAD CELL 2
     // -------------------------------------------------------------
     float rawBerat2 = LoadCell2.getData();
+    if (isnan(rawBerat2) || isinf(rawBerat2)) {
+      rawBerat2 = 0.0f;
+    }
+    if (rawBerat2 < -50.0f) rawBerat2 = -50.0f;
+    if (rawBerat2 > 500.0f) rawBerat2 = 500.0f;
+
     float filtered2 = beratKalman2.update(rawBerat2);
 
     if (fabs(filtered2) < AZT_WINDOW) {
@@ -213,7 +225,7 @@ void loop() {
     // PEMROSESAN TERMOKOPEL 1
     // -------------------------------------------------------------
     float rawTempC1 = thermocouple1.readCelsius();
-    if (!isnan(rawTempC1)) {
+    if (!isnan(rawTempC1) && rawTempC1 >= -10.0f && rawTempC1 <= 800.0f) {
       if (!suhu1Initialized) {
         suhuKalman1.reset(rawTempC1);
         displayTempC1 = rawTempC1;
@@ -230,7 +242,7 @@ void loop() {
     // PEMROSESAN TERMOKOPEL 2
     // -------------------------------------------------------------
     float rawTempC2 = thermocouple2.readCelsius();
-    if (!isnan(rawTempC2)) {
+    if (!isnan(rawTempC2) && rawTempC2 >= -10.0f && rawTempC2 <= 800.0f) {
       if (!suhu2Initialized) {
         suhuKalman2.reset(rawTempC2);
         displayTempC2 = rawTempC2;
@@ -253,37 +265,93 @@ void loop() {
   // PENANGANAN PERINTAH SERIAL MONITOR
   // ---------------------------------------------------------------
   if (Serial.available() > 0) {
-    char inByte = Serial.read();
-    if (inByte == '\r' || inByte == '\n') return;
-
-    if (inByte == 't') {
-      Serial.println(F("-> Melakukan Tare (set titik nol) kedua Load Cell..."));
-      LoadCell1.tareNoDelay();
-      LoadCell2.tareNoDelay();
-    } else if (inByte == '1') {
-      calibrateLoadCell(1, LoadCell1, calVal_eepromAddress1, beratKalman1, displayBerat1, lastChangeTime1, isWeightLocked1);
-    } else if (inByte == '2') {
-      calibrateLoadCell(2, LoadCell2, calVal_eepromAddress2, beratKalman2, displayBerat2, lastChangeTime2, isWeightLocked2);
-    } else if (inByte == 'j') {
-      compactJSON = !compactJSON;
-      Serial.print(F("-> Format JSON diubah: "));
-      Serial.println(compactJSON ? F("COMPACT (1 baris)") : F("INDENTED (Multi-baris)"));
-    } else if (inByte == '?' || inByte == 'h') {
-      printMenu();
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    if (cmd.length() > 0) {
+      if (cmd.equals("t")) {
+        Serial.println(F("-> Melakukan Tare (set titik nol) kedua Load Cell..."));
+        LoadCell1.tareNoDelay();
+        LoadCell2.tareNoDelay();
+      } else if (cmd.equals("CAL1_ZERO")) {
+        LoadCell1.tareNoDelay();
+        Serial.println(F("[CAL_STATUS] ZERO1_START"));
+      } else if (cmd.equals("CAL2_ZERO")) {
+        LoadCell2.tareNoDelay();
+        Serial.println(F("[CAL_STATUS] ZERO2_START"));
+      } else if (cmd.startsWith("CAL1_LOAD:")) {
+        float mass = cmd.substring(10).toFloat();
+        if (mass > 0.0001f) {
+          unsigned long startSettle = millis();
+          while (millis() - startSettle < 1500) {
+            LoadCell1.update();
+            delay(5);
+          }
+          LoadCell1.refreshDataSet();
+          float newCal = LoadCell1.getNewCalibration(mass);
+          if (!isnan(newCal) && !isinf(newCal) && fabs(newCal) > 0.001f) {
+            EEPROM.put(calVal_eepromAddress1, newCal);
+            LoadCell1.setCalFactor(newCal);
+            beratKalman1.reset(mass);
+            displayBerat1 = mass;
+            isWeightLocked1 = false;
+            lastChangeTime1 = millis();
+            Serial.print(F("[CAL_STATUS] CAL1_SUCCESS:"));
+            Serial.println(newCal, 4);
+          }
+        }
+      } else if (cmd.startsWith("CAL2_LOAD:")) {
+        float mass = cmd.substring(10).toFloat();
+        if (mass > 0.0001f) {
+          unsigned long startSettle = millis();
+          while (millis() - startSettle < 1500) {
+            LoadCell2.update();
+            delay(5);
+          }
+          LoadCell2.refreshDataSet();
+          float newCal = LoadCell2.getNewCalibration(mass);
+          if (!isnan(newCal) && !isinf(newCal) && fabs(newCal) > 0.001f) {
+            EEPROM.put(calVal_eepromAddress2, newCal);
+            LoadCell2.setCalFactor(newCal);
+            beratKalman2.reset(mass);
+            displayBerat2 = mass;
+            isWeightLocked2 = false;
+            lastChangeTime2 = millis();
+            Serial.print(F("[CAL_STATUS] CAL2_SUCCESS:"));
+            Serial.println(newCal, 4);
+          }
+        }
+      } else if (cmd.equals("1")) {
+        calibrateLoadCell(1, LoadCell1, calVal_eepromAddress1, beratKalman1, displayBerat1, lastChangeTime1, isWeightLocked1);
+      } else if (cmd.equals("2")) {
+        calibrateLoadCell(2, LoadCell2, calVal_eepromAddress2, beratKalman2, displayBerat2, lastChangeTime2, isWeightLocked2);
+      } else if (cmd.equals("j")) {
+        compactJSON = !compactJSON;
+        Serial.print(F("-> Format JSON diubah: "));
+        Serial.println(compactJSON ? F("COMPACT (1 baris)") : F("INDENTED (Multi-baris)"));
+      } else if (cmd.equals("?") || cmd.equals("h")) {
+        printMenu();
+      }
     }
   }
 
-  // Cek status Tare
-  if (LoadCell1.getTareStatus() == true || LoadCell2.getTareStatus() == true) {
+  // Cek status Tare Load Cell 1
+  if (LoadCell1.getTareStatus() == true) {
     beratKalman1.reset(0.0f);
-    beratKalman2.reset(0.0f);
     displayBerat1 = 0.0f;
-    displayBerat2 = 0.0f;
     isWeightLocked1 = false;
-    isWeightLocked2 = false;
     lastChangeTime1 = millis();
+    Serial.println(F("[CAL_STATUS] ZERO1_DONE"));
+    Serial.println(F("[STATUS] Tare Load Cell 1 selesai."));
+  }
+
+  // Cek status Tare Load Cell 2
+  if (LoadCell2.getTareStatus() == true) {
+    beratKalman2.reset(0.0f);
+    displayBerat2 = 0.0f;
+    isWeightLocked2 = false;
     lastChangeTime2 = millis();
-    Serial.println(F("[STATUS] Tare selesai. Titik nol berhasil disetel."));
+    Serial.println(F("[CAL_STATUS] ZERO2_DONE"));
+    Serial.println(F("[STATUS] Tare Load Cell 2 selesai."));
   }
 }
 
