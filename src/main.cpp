@@ -101,9 +101,10 @@ void setup() {
   LoadCell1.begin();
   LoadCell2.begin();
 
-  // Membalik polaritas agar gaya tekan (compression) bernilai positif (+)
-  LoadCell1.setReverseOutput();
-  LoadCell2.setReverseOutput();
+  // Polaritas: Ditekan (compression) bernilai Negatif (-), Direntangkan (tension) bernilai Positif (+)
+  // setReverseOutput() dinonaktifkan agar sesuai polaritas fisik standar
+  // LoadCell1.setReverseOutput();
+  // LoadCell2.setReverseOutput();
 
   // Baca faktor kalibrasi dari EEPROM
   float calValue1 = 0.0f;
@@ -115,6 +116,7 @@ void setup() {
     calValue1 = 1412.86f;
     Serial.println(F("[INFO] Load Cell 1 menggunakan faktor kalibrasi awal 1412.86."));
   } else {
+    calValue1 = fabs(calValue1);
     Serial.print(F("[INFO] Load Cell 1 Cal Factor: "));
     Serial.println(calValue1, 2);
   }
@@ -123,6 +125,7 @@ void setup() {
     calValue2 = 1412.86f;
     Serial.println(F("[INFO] Load Cell 2 menggunakan faktor kalibrasi awal 1412.86."));
   } else {
+    calValue2 = fabs(calValue2);
     Serial.print(F("[INFO] Load Cell 2 Cal Factor: "));
     Serial.println(calValue2, 2);
   }
@@ -156,7 +159,7 @@ void loop() {
     if (isnan(rawBerat1) || isinf(rawBerat1)) {
       rawBerat1 = 0.0f;
     }
-    if (rawBerat1 < -50.0f) rawBerat1 = -50.0f;
+    if (rawBerat1 < -500.0f) rawBerat1 = -500.0f;
     if (rawBerat1 > 500.0f) rawBerat1 = 500.0f;
 
     float filtered1 = beratKalman1.update(rawBerat1);
@@ -192,7 +195,7 @@ void loop() {
     if (isnan(rawBerat2) || isinf(rawBerat2)) {
       rawBerat2 = 0.0f;
     }
-    if (rawBerat2 < -50.0f) rawBerat2 = -50.0f;
+    if (rawBerat2 < -500.0f) rawBerat2 = -500.0f;
     if (rawBerat2 > 500.0f) rawBerat2 = 500.0f;
 
     float filtered2 = beratKalman2.update(rawBerat2);
@@ -287,12 +290,13 @@ void loop() {
             delay(5);
           }
           LoadCell1.refreshDataSet();
-          float newCal = LoadCell1.getNewCalibration(mass);
-          if (!isnan(newCal) && !isinf(newCal) && fabs(newCal) > 0.001f) {
+          float newCal = fabs(LoadCell1.getNewCalibration(mass));
+          if (!isnan(newCal) && !isinf(newCal) && newCal > 0.001f) {
             EEPROM.put(calVal_eepromAddress1, newCal);
             LoadCell1.setCalFactor(newCal);
-            beratKalman1.reset(mass);
-            displayBerat1 = mass;
+            float curReading1 = LoadCell1.getData();
+            beratKalman1.reset(curReading1);
+            displayBerat1 = curReading1;
             isWeightLocked1 = false;
             lastChangeTime1 = millis();
             Serial.print(F("[CAL_STATUS] CAL1_SUCCESS:"));
@@ -308,12 +312,13 @@ void loop() {
             delay(5);
           }
           LoadCell2.refreshDataSet();
-          float newCal = LoadCell2.getNewCalibration(mass);
-          if (!isnan(newCal) && !isinf(newCal) && fabs(newCal) > 0.001f) {
+          float newCal = fabs(LoadCell2.getNewCalibration(mass));
+          if (!isnan(newCal) && !isinf(newCal) && newCal > 0.001f) {
             EEPROM.put(calVal_eepromAddress2, newCal);
             LoadCell2.setCalFactor(newCal);
-            beratKalman2.reset(mass);
-            displayBerat2 = mass;
+            float curReading2 = LoadCell2.getData();
+            beratKalman2.reset(curReading2);
+            displayBerat2 = curReading2;
             isWeightLocked2 = false;
             lastChangeTime2 = millis();
             Serial.print(F("[CAL_STATUS] CAL2_SUCCESS:"));
@@ -468,7 +473,7 @@ void calibrateLoadCell(uint8_t cellNum, HX711_ADC &cell, int eepromAddr, KalmanF
   }
 
   cell.refreshDataSet();
-  float newCalValue = cell.getNewCalibration(known_mass);
+  float newCalValue = fabs(cell.getNewCalibration(known_mass));
 
   long tareOffset = cell.getTareOffset();
   long rawWithLoad = (long)(cell.getData() * newCalValue) + tareOffset;
@@ -503,8 +508,9 @@ void calibrateLoadCell(uint8_t cellNum, HX711_ADC &cell, int eepromAddr, KalmanF
     }
   }
 
-  kalman.reset(known_mass);
-  disp = known_mass;
+  float curD = cell.getData();
+  kalman.reset(curD);
+  disp = curD;
   isLocked = true;
   lastTime = millis();
 

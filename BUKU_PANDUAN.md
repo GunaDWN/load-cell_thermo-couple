@@ -102,8 +102,12 @@ Kabel dari sensor Load Cell dihubungkan ke terminal input modul HX711:
    Kabel Kuning / Telanjang (Bila ada) ->    Shield / GND
 ```
 
-> **Catatan Penting**:
-> Jika saat pengujian beban ditekan namun angka timbangan bergerak ke arah negatif (berkurang), Anda cukup menukar kabel **`A+`** (Hijau) dan **`A-`** (Putih), atau melakukan kalibrasi melalui menu Wizard Kalibrasi di aplikasi GUI.
+> **Standar Konvensi Polaritas Beban**:
+> Sistem menggunakan standar konvensi mekanik:
+> - **Gaya Tekan (*Compression* / Ditekan)**: bernilai **Negatif (-)**.
+> - **Gaya Tarik / Rentang (*Tension* / Direntangkan)**: bernilai **Positif (+)**.
+> 
+> Jika arah pembacaan terbalik dari konvensi ini pada modul Anda, cukup tukar posisi kabel **`A+`** (Hijau) dan **`A-`** (Putih).
 
 ---
 
